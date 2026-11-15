@@ -1,0 +1,69 @@
+# Copy to .github/workflows/all-inkl-deploy.yml; call AFTER the project's build job.
+# The artifact must contain release.zip and release.zip.sha256 at its root.
+name: all-inkl release deployment
+on:
+  workflow_call:
+    inputs:
+      artifact_name:
+        required: true
+        type: string
+      environment:
+        type: string
+        default: production
+      project_root:
+        required: true
+        type: string
+      php_command:
+        type: string
+        default: php85
+    secrets:
+      DEPLOY_SSH_KEY:
+        required: true
+      DEPLOY_KNOWN_HOSTS:
+        required: true
+      DEPLOY_SSH_CONFIG:
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: all-inkl-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: release-artifact
+      - name: Configure SSH
+        shell: bash
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          SSH_CONFIG: ${{ secrets.DEPLOY_SSH_CONFIG }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/all-inkl-deploy
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          printf '%s\n' "$SSH_CONFIG" > ~/.ssh/config
+      - name: Upload and activate the tested release
+        shell: bash
+        env:
+          DEPLOY_SSH_HOST: all-inkl-ci
+          DEPLOY_ROOT: ${{ inputs.project_root }}
+          DEPLOY_PHP: ${{ inputs.php_command }}
+        run: bash deploy/deploy-ssh.sh release-artifact/release.zip
+      - name: Remove temporary SSH credentials
+        if: always()
+        shell: bash
+        run: rm -f ~/.ssh/all-inkl-deploy ~/.ssh/config ~/.ssh/known_hosts
