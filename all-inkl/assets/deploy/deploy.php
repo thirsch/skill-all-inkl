@@ -136,7 +136,7 @@ function installRelease(array $config, string $zipPath, string $digest): string 
                 need(!in_array($part, ['.git', '.svn', '.ssh', 'node_modules'], true) &&
                     (!str_starts_with($part, '.env') || $part === '.env.example'), 'Forbidden ZIP content: ' . $name);
             }
-            need($name !== '.deploy-ready.json', 'Reserved ZIP path');
+            need(!in_array(explode('/', $name)[0], ['.deploy-ready.json', 'deployment.json'], true), 'Reserved ZIP path');
             need($zip->getExternalAttributesIndex($i, $system, $attributes), 'Cannot inspect ZIP attributes');
             $mode = ($attributes >> 16) & 0170000;
             need(in_array($mode, [0, 0100000, 0040000], true), 'ZIP symlinks and special files are forbidden');
@@ -150,6 +150,9 @@ function installRelease(array $config, string $zipPath, string $digest): string 
         need(is_array($manifestStat) && $manifestStat['size'] <= 4096, 'Missing or oversized release.json');
         $manifest = json_decode($zip->getFromName('release.json'), true, 8, JSON_THROW_ON_ERROR);
         need(($manifest['format'] ?? null) === 1, 'Unsupported release format');
+        $version = $manifest['version'] ?? null;
+        need($version === null || (is_string($version) &&
+            preg_match('/\A[A-Za-z0-9][A-Za-z0-9._+-]{0,127}\z/', $version)), 'Invalid application version');
         $id = releaseId($manifest['id']);
         $release = $config['root'] . '/releases/' . $id;
         need(!file_exists($release) && !is_link($release), 'Release already exists; use activate or a new ID');
@@ -180,6 +183,8 @@ function installRelease(array $config, string $zipPath, string $digest): string 
             $sourcePath = $config['root'] . '/shared/' . relativePath($source);
             $realSource = realpath($sourcePath);
             need($realSource !== false && str_starts_with($realSource, $config['root'] . '/shared/'), 'Shared source missing or outside shared/');
+            need(!in_array(explode('/', $destination)[0], ['release.json', '.deploy-ready.json', 'deployment.json'], true),
+                'Release metadata must not be shared');
             $target = "$release/" . relativePath($destination);
             need(!file_exists($target) && !is_link($target), 'Shared destination is present in ZIP');
             // Forbid nested mappings that could traverse a previously attached symlink.
@@ -203,6 +208,25 @@ function installRelease(array $config, string $zipPath, string $digest): string 
         $zip->close();
     }
 }
+/** Atomic replacement outside public/; metadata never comes from a release ZIP. */
+function writeDeploymentMetadata(string $path, string $json): void {
+    $temporary = $path . '.' . bin2hex(random_bytes(8));
+    $stream = fopen($temporary, 'xb');
+    try {
+        need(fwrite($stream, $json) === strlen($json), 'Cannot write deployment metadata');
+        fclose($stream);
+        $stream = null;
+        need(chmod($temporary, 0644), 'Cannot set deployment metadata permissions');
+        need(rename($temporary, $path), 'Cannot replace deployment metadata');
+    } finally {
+        if (is_resource($stream)) {
+            fclose($stream);
+        }
+        if (file_exists($temporary)) {
+            unlink($temporary);
+        }
+    }
+}
 function activate(array $config, string $id): void {
     $id = releaseId($id);
     $root = $config['root'];
@@ -213,7 +237,28 @@ function activate(array $config, string $id): void {
     if ($old !== null && $old !== "releases/$id") {
         switchLink($root, 'previous', $old);
     }
-    switchLink($root, 'current', "releases/$id");
+    $metadataPath = "$release/deployment.json";
+    need(!is_link($metadataPath) && (!file_exists($metadataPath) || is_file($metadataPath)),
+        'Deployment metadata must be a regular file');
+    $previousMetadata = is_file($metadataPath) ? file_get_contents($metadataPath) : null;
+    // Stamp at activation, never at build/install/check time. Even same-release activations
+    // receive a unique identity, so health caches cannot reuse the previous activation.
+    $metadata = json_encode([
+        'release' => $id,
+        'deployed_at' => (new DateTimeImmutable('now', new DateTimeZone('UTC')))->format('Y-m-d\TH:i:s.u\Z'),
+        'activation_id' => bin2hex(random_bytes(16)),
+    ], JSON_THROW_ON_ERROR);
+    writeDeploymentMetadata($metadataPath, $metadata);
+    try {
+        switchLink($root, 'current', "releases/$id");
+    } catch (Throwable $error) {
+        if ($previousMetadata === null) {
+            unlink($metadataPath);
+        } else {
+            writeDeploymentMetadata($metadataPath, $previousMetadata);
+        }
+        throw $error;
+    }
     echo "Activated: $id; previous: " . ($old ?? 'none') . "\n";
     // Never pretend a DB migration can be undone by changing a symlink.
     try {

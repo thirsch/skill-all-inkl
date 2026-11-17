@@ -9,10 +9,13 @@ import zipfile
 from pathlib import Path
 
 
-def package(source, output, release_id):
+def package(source, output, release_id, version=None):
     source, output = Path(source).resolve(), Path(output).resolve()
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,79}", release_id):
         raise ValueError("Release-ID: 1–80 letters, digits, underscores or hyphens")
+    if version is not None and (not isinstance(version, str) or
+                                not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}", version)):
+        raise ValueError("Version: 1–128 letters, digits, dots, underscores, pluses or hyphens")
     if not (source / "public").is_dir():
         raise ValueError("Production directory must contain public/")
     if output == source or source in output.parents:
@@ -26,7 +29,7 @@ def package(source, output, release_id):
         if any(p in {".git", ".svn", ".ssh", "node_modules"} or
                (p.startswith(".env") and p != ".env.example") for p in relative.parts):
             raise ValueError(f"Forbidden production content: {name}")
-        if name in {"release.json", ".deploy-ready.json"}:
+        if relative.parts[0] in {"release.json", ".deploy-ready.json", "deployment.json"}:
             raise ValueError(f"Reserved filename: {name}")
         if "\\" in name or ":" in name or any(ord(c) < 32 for c in name):
             raise ValueError(f"Unsupported path: {name!r}")
@@ -37,7 +40,7 @@ def package(source, output, release_id):
     output.parent.mkdir(parents=True, exist_ok=True)
     # Exclusive creation prevents overwriting an existing release artifact.
     with zipfile.ZipFile(output, "x", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("release.json", json.dumps({"format": 1, "id": release_id}))
+        archive.writestr("release.json", json.dumps({"format": 1, "id": release_id, "version": version}))
         for path, name in files:
             info = zipfile.ZipInfo(name, date_time=(2020, 1, 1, 0, 0, 0))
             info.create_system = 3
@@ -61,8 +64,9 @@ if __name__ == "__main__":
     parser.add_argument("source", help="Prepared production tree containing public/")
     parser.add_argument("output", help="New release ZIP, outside source")
     parser.add_argument("release_id", help="Unique ID, e.g. commit SHA plus CI run number")
+    parser.add_argument("--version", help="Application version from the project manifest or published tag; omit if unknown")
     args = parser.parse_args()
     try:
-        package(args.source, args.output, args.release_id)
+        package(args.source, args.output, args.release_id, args.version)
     except (ValueError, OSError) as error:
         parser.exit(1, f"Packaging failed: {error}\n")

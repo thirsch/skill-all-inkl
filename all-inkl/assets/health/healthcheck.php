@@ -1,8 +1,45 @@
 <?php
 declare(strict_types=1);
 
+/** Read one metadata snapshot from the release actually executing this request. */
+function allInklHealthMetadata(string $releaseRoot): array
+{
+    $manifest = json_decode(file_get_contents($releaseRoot . '/release.json'), true, 8, JSON_THROW_ON_ERROR);
+    if (!is_array($manifest) || ($manifest['format'] ?? null) !== 1 ||
+        !is_string($manifest['id'] ?? null) || !preg_match('/\A[A-Za-z0-9][A-Za-z0-9_-]{0,79}\z/', $manifest['id'])) {
+        throw new RuntimeException('Invalid release manifest');
+    }
+    $version = $manifest['version'] ?? null;
+    if ($version !== null && (!is_string($version) || !preg_match('/\A[A-Za-z0-9][A-Za-z0-9._+-]{0,127}\z/', $version))) {
+        throw new RuntimeException('Invalid application version');
+    }
+    $deployment = [];
+    $path = $releaseRoot . '/deployment.json';
+    if (is_link($path)) {
+        throw new RuntimeException('Deployment metadata must not be shared');
+    }
+    if (file_exists($path)) {
+        $deployment = json_decode(file_get_contents($path), true, 8, JSON_THROW_ON_ERROR);
+        $date = $deployment['deployed_at'] ?? null;
+        if (!is_array($deployment) || !is_string($date) ||
+            !preg_match('/\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?(?:Z|[+-][0-9]{2}:[0-9]{2})\z/', $date) ||
+            (($deployment['release'] ?? $manifest['id']) !== $manifest['id']) ||
+            (isset($deployment['activation_id']) && (!is_string($deployment['activation_id']) ||
+                !preg_match('/\A[a-f0-9]{32}\z/', $deployment['activation_id'])))) {
+            throw new RuntimeException('Invalid deployment metadata');
+        }
+        new DateTimeImmutable($date);
+        if (DateTimeImmutable::getLastErrors() !== false) {
+            throw new RuntimeException('Invalid deployment date');
+        }
+    }
+    return ['release' => $manifest['id'], 'version' => $version,
+        'deployed_at' => $deployment['deployed_at'] ?? null,
+        'activation_id' => $deployment['activation_id'] ?? null];
+}
+
 /** Run project-selected checks. Returned data never contains paths, DSNs or exceptions. */
-function allInklHealth(array $config, string $releaseRoot): array
+function allInklHealth(array $config, string $releaseRoot, ?array $metadata = null): array
 {
     $checks = [];
     $healthy = true;
@@ -30,11 +67,7 @@ function allInklHealth(array $config, string $releaseRoot): array
         return $value;
     };
 
-    $manifest = json_decode(file_get_contents($releaseRoot . '/release.json'), true, 8, JSON_THROW_ON_ERROR);
-    if (!is_array($manifest) || ($manifest['format'] ?? null) !== 1 ||
-        !is_string($manifest['id'] ?? null) || !preg_match('/\A[A-Za-z0-9][A-Za-z0-9_-]{0,79}\z/', $manifest['id'])) {
-        throw new RuntimeException('Invalid release manifest');
-    }
+    $metadata ??= allInklHealthMetadata($releaseRoot);
     $minor = $config['php_minor'] ?? null;
     if (!is_string($minor) || !preg_match('/\A[0-9]+\.[0-9]+\z/', $minor)) {
         throw new InvalidArgumentException('Invalid PHP target');
@@ -101,7 +134,9 @@ function allInklHealth(array $config, string $releaseRoot): array
 
     return [
         'status' => $healthy ? 'ok' : 'failed',
-        'release' => $manifest['id'],
+        'release' => $metadata['release'],
+        'version' => $metadata['version'],
+        'deployed_at' => $metadata['deployed_at'],
         'php' => PHP_VERSION,
         'sapi' => PHP_SAPI,
         'checked_at' => gmdate('c'),
@@ -170,11 +205,9 @@ function allInklCachedHealth(array $config, string $releaseRoot): array
         str_starts_with($directory . '/', $releaseRoot . '/public/')) {
         throw new RuntimeException('Private shared cache directory required');
     }
-    $manifest = json_decode(file_get_contents($releaseRoot . '/release.json'), true, 8, JSON_THROW_ON_ERROR);
-    $id = $manifest['id'] ?? null;
-    if (!is_string($id) || !preg_match('/\A[A-Za-z0-9][A-Za-z0-9_-]{0,79}\z/', $id)) {
-        throw new RuntimeException('Invalid release manifest');
-    }
+    $metadata = allInklHealthMetadata($releaseRoot);
+    $identity = hash('sha256', json_encode($metadata, JSON_THROW_ON_ERROR));
+    unset($metadata['activation_id']);
     $filename = $directory . '/health-state.json';
     $lockfile = $directory . '/health.lock';
     if (is_link($filename) || is_link($lockfile)) {
@@ -186,22 +219,22 @@ function allInklCachedHealth(array $config, string $releaseRoot): array
     try {
         $state = is_file($filename) ? json_decode(file_get_contents($filename), true, 32, JSON_THROW_ON_ERROR) : [];
         $remaining = ($state['not_before'] ?? 0) - microtime(true);
-        if ($remaining > 0 && ($state['release'] ?? null) === $id && is_array($state['report'] ?? null)) {
+        if ($remaining > 0 && ($state['identity'] ?? null) === $identity && is_array($state['report'] ?? null)) {
             return [$state['report'], 'HIT', (int)ceil($remaining)];
         }
         if (!$locked || $remaining > 0) {
-            return [['status' => 'failed', 'release' => $id, 'checks' => ['health_refresh' => 'pending']],
+            return [$metadata + ['status' => 'failed', 'checks' => ['health_refresh' => 'pending']],
                 'WAIT', max(1, (int)ceil($remaining))];
         }
         // Reserve the interval BEFORE probing, so even a failed worker cannot cause a probe storm.
-        allInklWriteHealthState($filename, ['release' => $id, 'not_before' => microtime(true) + $ttl, 'report' => null]);
+        allInklWriteHealthState($filename, ['identity' => $identity, 'not_before' => microtime(true) + $ttl, 'report' => null]);
         try {
-            $report = allInklHealth($config, $releaseRoot);
+            $report = allInklHealth($config, $releaseRoot, $metadata);
         } catch (Throwable) {
-            $report = ['status' => 'failed', 'release' => $id, 'checks' => ['health_configuration' => 'failed']];
+            $report = $metadata + ['status' => 'failed', 'checks' => ['health_configuration' => 'failed']];
         }
         $report['check_id'] = bin2hex(random_bytes(16));
-        allInklWriteHealthState($filename, ['release' => $id, 'not_before' => microtime(true) + $ttl, 'report' => $report]);
+        allInklWriteHealthState($filename, ['identity' => $identity, 'not_before' => microtime(true) + $ttl, 'report' => $report]);
         return [$report, 'MISS', $ttl];
     } finally {
         if ($locked) {

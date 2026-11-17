@@ -1,6 +1,7 @@
 """Run with Python 3 and PHP 8.5 + ZipArchive; all writes stay in temporary trees."""
 import functools
 import base64
+from datetime import datetime, timezone
 import hashlib
 import http.server
 import json
@@ -41,6 +42,30 @@ class QuietHandler(http.server.SimpleHTTPRequestHandler):
 
 
 class PackagingTests(unittest.TestCase):
+    def test_version_and_server_owned_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / 'source'
+            (source / 'public').mkdir(parents=True)
+            (source / 'public/index.php').write_text('ok')
+            def run(name, *options):
+                return subprocess.run([sys.executable, str(ASSETS / 'package-release.py'),
+                                       str(source), str(root / name), 'r1', *options], capture_output=True)
+            for name, options, expected in [('known', ['--version', 'v1.2.3-rc.1+build.4'], 'v1.2.3-rc.1+build.4'),
+                                             ('unknown', [], None)]:
+                self.assertEqual(run(name, *options).returncode, 0)
+                with zipfile.ZipFile(root / name) as archive:
+                    manifest = json.loads(archive.read('release.json'))
+                    self.assertEqual(manifest['version'], expected)
+                    self.assertNotIn('deployed_at', manifest)
+                    self.assertNotIn('deployment.json', archive.namelist())
+            for value in ['', 'bad version', 'a' * 129, 'x\nsecret']:
+                self.assertNotEqual(run('invalid', '--version', value).returncode, 0)
+                self.assertFalse((root / 'invalid').exists())
+            (source / 'deployment.json').write_text('{"deployed_at":"fake"}')
+            self.assertNotEqual(run('forged').returncode, 0)
+            self.assertFalse((root / 'forged').exists())
+
     def test_package_and_reject_secrets_symlinks(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -119,14 +144,28 @@ class DeploymentTests(unittest.TestCase):
     def test_install_activate_update_and_rollback(self):
         self.call('install', *self.archive('r1'))
         self.assertFalse((self.root / 'current').exists())
+        self.assertFalse((self.root / 'releases/r1/deployment.json').exists())
+        before = datetime.now(timezone.utc)
         self.call('activate', 'r1')
         self.assertEqual(self.current(), 'releases/r1')
+        first = json.loads((self.root / 'current/deployment.json').read_text())
+        self.assertEqual(first['release'], 'r1')
+        activated = datetime.fromisoformat(first['deployed_at'].replace('Z', '+00:00'))
+        self.assertLessEqual(before, activated)
+        self.assertLessEqual(activated, datetime.now(timezone.utc))
         self.call('deploy', *self.archive('r2'))
         self.assertEqual(self.current(), 'releases/r2')
         self.assertEqual(os.readlink(self.root / 'previous'), 'releases/r1')
         self.assertEqual((self.root / 'current/.env').read_text(), 'KEEP_ME=yes')
         self.call('rollback', 'r1')
         self.assertEqual(self.current(), 'releases/r1')
+        rollback = json.loads((self.root / 'current/deployment.json').read_text())
+        self.assertNotEqual(rollback['activation_id'], first['activation_id'])
+        self.assertGreater(rollback['deployed_at'], first['deployed_at'])
+        self.call('activate', 'r1')
+        repeated = json.loads((self.root / 'current/deployment.json').read_text())
+        self.assertNotEqual(repeated['activation_id'], rollback['activation_id'])
+        self.assertGreater(repeated['deployed_at'], rollback['deployed_at'])
         self.call('deploy', *self.archive('r1'), ok=False)
         self.assertEqual(self.current(), 'releases/r1')
 
@@ -137,10 +176,19 @@ class DeploymentTests(unittest.TestCase):
             (source / 'public/index.php').write_text('ok ' + release_id)
             output = self.base / 'dist' / release_id / 'release.zip'
             result = subprocess.run([sys.executable, str(ASSETS / 'package-release.py'),
-                                     str(source), str(output), release_id], capture_output=True, text=True)
+                                     str(source), str(output), release_id, '--version', '1.2.3'], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.call('deploy', str(output), Path(str(output) + '.sha256').read_text().strip())
             self.assertEqual((self.root / 'current/public/index.php').read_text(), 'ok ' + release_id)
+            # Read the actual packaged manifest + server activation metadata through the health library.
+            report = json.loads(subprocess.check_output(['php', '-r',
+                'require $argv[1]; echo json_encode(allInklHealth(["php_minor"=>"8.5"], $argv[2]));',
+                str(ASSETS.parent / 'health/healthcheck.php'), str((self.root / 'current').resolve())], text=True))
+            self.assertEqual(report['version'], '1.2.3')
+            self.assertEqual(report['release'], release_id)
+            metadata = json.loads((self.root / 'current/deployment.json').read_text())
+            self.assertEqual(report['deployed_at'], metadata['deployed_at'])
+            self.assertNotIn('activation_id', report)
         self.call('rollback', 'packed-r1')
         self.assertEqual((self.root / 'current/public/index.php').read_text(), 'ok packed-r1')
 
@@ -209,7 +257,7 @@ class DeploymentTests(unittest.TestCase):
     def test_checksum_and_archive_path_attacks(self):
         path, digest = self.archive('bad-hash')
         self.call('deploy', path, '0' * 64, ok=False)
-        for number, name in enumerate(['../escape', '/absolute', 'public/../../escape', 'public\\escape', '.env', '.deploy-ready.json']):
+        for number, name in enumerate(['../escape', '/absolute', 'public/../../escape', 'public\\escape', '.env', '.deploy-ready.json', 'deployment.json', 'deployment.json/forged']):
             self.call('deploy', *self.archive(f'bad-{number}', {name: 'bad'}), ok=False)
         symlink = zipfile.ZipInfo('public/link')
         symlink.create_system = 3
@@ -217,6 +265,18 @@ class DeploymentTests(unittest.TestCase):
         self.call('deploy', *self.archive('bad-symlink', {symlink: '../../outside'}), ok=False)
         self.assertFalse((self.root / 'current').exists())
         self.assertEqual(list((self.root / 'releases').iterdir()), [])
+
+    def test_metadata_cannot_be_shared_or_redirected(self):
+        self.call('deploy', *self.archive('good'))
+        self.call('install', *self.archive('next'))
+        (self.root / 'releases/next/deployment.json').symlink_to(self.root / 'shared/.env')
+        self.call('activate', 'next', ok=False)
+        self.assertEqual(self.current(), 'releases/good')
+        self.assertEqual((self.root / 'shared/.env').read_text(), 'KEEP_ME=yes')
+        self.config['shared']['deployment.json'] = '.env'
+        self.save_config()
+        self.call('install', *self.archive('shared-metadata'), ok=False)
+        self.assertFalse((self.root / 'releases/shared-metadata/.deploy-ready.json').exists())
 
     def test_shared_hook_and_health_failures(self):
         self.call('deploy', *self.archive('good'))
@@ -235,6 +295,7 @@ class DeploymentTests(unittest.TestCase):
         result = self.call('deploy', *self.archive('failed-health', body='unhealthy'), ok=False)
         self.assertIn('AFTER activation', result.stderr)
         self.assertEqual(self.current(), 'releases/failed-health')
+        self.assertEqual(json.loads((self.root / 'current/deployment.json').read_text())['release'], 'failed-health')
         self.assertEqual((self.root / 'current/prepared').read_text(), 'yes')
         self.call('rollback', 'good')
 

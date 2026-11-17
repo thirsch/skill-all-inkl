@@ -80,7 +80,7 @@ Ohne oder mit falschem Basic-Auth-Zugang liefert der Endpunkt **401** samt `WWW-
 
 Nach erfolgreicher Authentifizierung schützt ein gemeinsames `flock` vor parallelen Probes. Erfolg **und Fehler** werden für das konfigurierte Intervall gespeichert. Ein belegtes Lock ohne gültigen Cache liefert kurzzeitig 503 mit `Retry-After`, statt einen zweiten Datenbankzugriff auszulösen. Die nächste Prüfung erfolgt frühestens ein Intervall nach Abschluss der vorherigen; vor ihrem Start wird zusätzlich eine Sperrfrist reserviert, damit auch ein abgebrochener Worker keine sofortige Prüfflut auslöst. Cache-/Lockdateien im Betrieb nicht löschen, um das Limit nicht zu umgehen.
 
-Ein neues Release bekommt niemals das Ergebnis eines alten Releases. Falls das gemeinsame Intervall noch läuft, antwortet es zunächst mit 503/`health_refresh: pending`, bis seine eigene Prüfung erlaubt ist. Dadurch gilt das Limit auch während Releasewechseln. Die Antwort enthält eine zufällige `check_id`, die nur bei einer echten Prüfung neu entsteht. `X-Health-Cache` unterscheidet `MISS`, `HIT` und `WAIT`; Browser-/Proxy-Caching bleibt durch `Cache-Control: no-store` abgeschaltet.
+Ein neues Release oder eine erneute Aktivierung (auch Rollback auf dieselbe Release-ID) bekommt niemals das Ergebnis einer vorherigen Aktivierung. Falls das gemeinsame Intervall noch läuft, antwortet es zunächst mit 503/`health_refresh: pending`, bis seine eigene Prüfung erlaubt ist. Dadurch gilt das Limit auch während Releasewechseln. Die Antwort enthält eine zufällige `check_id`, die nur bei einer echten Prüfung neu entsteht. `X-Health-Cache` unterscheidet `MISS`, `HIT` und `WAIT`; Browser-/Proxy-Caching bleibt durch `Cache-Control: no-store` abgeschaltet.
 
 Erforderliche Prüfungen erfolgreich: HTTP **200**, `status: ok`. Fehlende Pflicht-Erweiterung, Datenbankfehler, PHP-Abweichung, nicht beschreibbares Verzeichnis oder fehlerhafte Konfiguration: HTTP **503**, `status: failed`. Optionale Fehlschläge stehen als `warning` in `checks`; der Gesamtstatus bleibt erfolgreich, solange alle Pflichtprüfungen bestehen.
 
@@ -88,6 +88,10 @@ Erforderliche Prüfungen erfolgreich: HTTP **200**, `status: ok`. Fehlende Pflic
 {
   "status": "ok",
   "release": "build-42",
+  "version": "1.2.3",
+  "deployed_at": "2026-11-17T08:00:00.123456Z",
+  "checked_at": "2026-11-17T08:00:10+00:00",
+  "check_id": "75febc3b4b04fe1ebcbf66b465234892",
   "php": "8.5.x",
   "sapi": "cgi-fcgi",
   "checks": {
@@ -100,7 +104,24 @@ Erforderliche Prüfungen erfolgreich: HTTP **200**, `status: ok`. Fehlende Pflic
 }
 ```
 
-Reale Antwort ergänzt `checked_at`; Versions- und SAPI-Werte werden zur Laufzeit ermittelt. Keine DSNs, Credentials, SQL-Fehler, Stacktraces oder vollständige `phpinfo()`-Ausgabe zurückgeben. Die öffentliche Antwort enthält nur den kleinen konfigurierten Prüfumfang. Vorhandene Zugriffsbeschränkungen des Projekts berücksichtigen.
+PHP-Version, SAPI und `checked_at` werden zur Laufzeit ermittelt; `check_id` bezeichnet eine echte Prüfung. Keine DSNs, Credentials, SQL-Fehler, Stacktraces oder vollständige `phpinfo()`-Ausgabe zurückgeben. Die öffentliche Antwort enthält nur den kleinen konfigurierten Prüfumfang. Vorhandene Zugriffsbeschränkungen des Projekts berücksichtigen.
+
+### Metadaten für das Deployment-Dashboard
+
+| Feld | Quelle und Bedeutung |
+| --- | --- |
+| `release` | Eindeutige Artefakt-ID aus `release.json.id`; bleibt für den Smoke-Test erhalten. |
+| `version` | Anwendungsversion aus `release.json.version`, beim Paketieren mit `--version` gesetzt; kein PHP-Versionswert. Ohne bekannte Version `null`. |
+| `deployed_at` | Zeitpunkt der letzten Aktivierung dieses Releases aus `deployment.json`, ISO 8601 mit Zeitzone; der Deployer schreibt UTC. Ohne bekannten Zeitpunkt `null`. |
+| `checked_at` | Zeitpunkt der eigentlichen Healthprüfung, im Cache unverändert. Kein Ersatz für `deployed_at`. |
+
+Die Anwendungsversion aus der maßgeblichen Projektquelle (z.B. `package.json` oder veröffentlichter Release-Tag) in den Build übernehmen. Nicht automatisch aus einer Commit-ID ableiten und keine GitHub-Veröffentlichung allein wegen eines Versionswerts annehmen. Entwicklungsdeployments dürfen ebenfalls eine Version haben; die GitHub-Updateprüfung aktiviert das Dashboard separat anhand seiner Produktions-/Release-Konfiguration.
+
+`deployment.json` liegt im Release außerhalb von `public/`, ist weder Builddatei noch Shared-Zuordnung und wird nur vom Deployer geschrieben. Aktivierung, erneute Aktivierung und Code-Rollback setzen einen neuen Zeitpunkt und eine interne zufällige `activation_id`. Installation ohne Aktivierung erzeugt keinen Zeitpunkt. Der Cache berücksichtigt diese Identität zusätzlich zu Release und Version; auch bei schnellen Reaktivierungen wird keine alte Prüfantwort wiederverwendet. Die gemeinsame Sperrfrist bleibt erhalten. Bei laufender Sperrfrist stehen die aktuellen Metadaten bereits in der 503-Antwort mit `health_refresh: pending`. Die interne Aktivierungs-ID wird nicht ausgegeben.
+
+Alte Manifeste ohne `version` und Releases ohne `deployment.json` bleiben funktionsfähig und liefern für die fehlenden Angaben `null`. Ein vorhandener gültiger Zeitstempel ohne zusätzliche Aktivierungs-ID wird ebenfalls gelesen. Fehlerhafte vorhandene Metadaten ergeben eine bereinigte 503-Antwort. Niemals Deploymentzeiten aus Dateizeit, Builddatum, GitHub-Veröffentlichung oder dem aktuellen Healthcheck erfinden.
+
+Für bestehende Projekte Build/Packer, serverseitigen Deployer und Health-Bibliothek gemeinsam aktualisieren; vorhandene projektspezifische Erweiterungen erhalten. Bereits kopierte Skill-Dateien ändern sich nicht automatisch. Die neuen Felder erscheinen erst mit dem entsprechend gebauten und aktivierten Release; historische Deploymentzeiten werden nicht nachgetragen. Eigene Framework-Healthrouten müssen denselben Vertrag umsetzen. Statische Build-Healthdateien können eine Version liefern, aber keinen tatsächlichen Aktivierungszeitpunkt vorhersagen: dort `deployed_at: null`, sofern kein eigener Aktivierungsadapter vorhanden ist.
 
 In der Deploymentkonfiguration `health_url` auf diesen Endpunkt, `health_contains` auf `"status":"ok"`, `health_release_field` auf `release` und `health_check_id_field` auf `check_id` setzen. `health_basic_auth_file` zeigt auf den absoluten geschützten Pfad zu `shared/health-client.json`. Zugangsdaten werden als Authorization-Header übermittelt, niemals in der URL; der Deployer folgt keinen Redirects. Dieselbe Cache-Antwort zählt nicht mehrfach zur geforderten Serie erfolgreicher Prüfungen. Standard: maximal 40 Versuche, fünf Sekunden Abstand, drei unterschiedliche erfolgreiche Prüf-IDs. Das berücksichtigt sowohl den 10-Sekunden-Cache als auch verzögert aktualisierte PHP-Worker.
 
@@ -110,7 +131,7 @@ Für reine statische Sites keine unnötige PHP-Anwendung einführen; deren Build
 
 ## Validierung
 
-Lokal: `python3 -m unittest discover -s tests -v` im Skill mit PHP 8.5, ZIP und für den Datenbankadapter-Test PDO SQLite. Abgedeckt sind Pflicht-/Optionalverhalten, echte HTTP-Statuscodes, Alternativen, PHP-Version, Verzeichnisse, `SELECT 1`, geheime Fehlerdetails und ungültige Konfiguration.
+Lokal: `python3 -m unittest discover -s tests -v` im Skill mit PHP 8.5, ZIP und für den Datenbankadapter-Test PDO SQLite. Abgedeckt sind Pflicht-/Optionalverhalten, echte HTTP-Statuscodes, Alternativen, PHP-Version, Verzeichnisse, `SELECT 1`, geheime Fehlerdetails und ungültige Konfiguration. Metadatentests prüfen Paketversion, Aktivierung statt Installation, Rollback/Reaktivierung, fehlende Alt-Metadaten und Cachewechsel ohne Umgehung der Sperrfrist.
 
 Bei einem autorisierten Praxistest keine Servermodule abschalten. Eine fest konfigurierte, vorübergehende separate Testroute kann eine garantiert nicht vorhandene Erweiterung als Pflicht verlangen: erwartet HTTP 503. Derselbe Name als optional: erwartet HTTP 200 plus Warnung. Das reguläre Healthziel bleibt dabei unverändert nutzbar. Solche Testrouten anschließend durch ein sauberes Folgerelease entfernen; keine öffentliche Fehler-Injektion über Queryparameter hinterlassen.
 

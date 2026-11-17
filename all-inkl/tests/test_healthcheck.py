@@ -85,6 +85,8 @@ class HealthcheckTests(unittest.TestCase):
     def test_required_optional_and_web_runtime(self):
         report = self.fetch(200)
         self.assertEqual(report['release'], 'health-test')
+        self.assertIsNone(report['version'])
+        self.assertIsNone(report['deployed_at'])
         self.assertEqual(report['sapi'], 'cli-server')
         self.assertEqual(report['checks']['extension:json'], 'ok')
         self.config['optional_extensions'] = ['codex_missing_extension_probe']
@@ -93,6 +95,59 @@ class HealthcheckTests(unittest.TestCase):
         self.config['required_extensions'].append('codex_missing_extension_probe')
         self.save()
         self.assertEqual(self.fetch(503)['checks']['extension:codex_missing_extension_probe'], 'failed')
+
+    def test_version_activation_and_cache_identity(self):
+        (self.root / 'release.json').write_text(json.dumps({'format': 1, 'id': 'health-test', 'version': 'v1.2.3'}))
+        metadata = {'release': 'health-test', 'deployed_at': '2026-11-17T08:00:00.123456Z', 'activation_id': 'a' * 32}
+        (self.root / 'deployment.json').write_text(json.dumps(metadata))
+        first = self.fetch(200)
+        self.assertEqual(first['version'], 'v1.2.3')
+        self.assertEqual(first['deployed_at'], metadata['deployed_at'])
+        self.assertNotIn('activation_id', first)
+        self.assertEqual(self.fetch(200)['check_id'], first['check_id'])
+        # Even an activation within the same timestamp resolution must invalidate cached probes.
+        metadata['activation_id'] = 'b' * 32
+        (self.root / 'deployment.json').write_text(json.dumps(metadata))
+        pending = self.fetch(503)
+        self.assertEqual(pending['checks'], {'health_refresh': 'pending'})
+        self.assertEqual(pending['version'], 'v1.2.3')
+        self.assertEqual(pending['deployed_at'], metadata['deployed_at'])
+        time.sleep(1.1)
+        refreshed = self.fetch(200)
+        self.assertNotEqual(refreshed['check_id'], first['check_id'])
+        self.assertEqual(refreshed['deployed_at'], first['deployed_at'])
+        metadata['deployed_at'] = '2026-11-17T09:00:00.123456Z'
+        metadata['activation_id'] = 'c' * 32
+        (self.root / 'deployment.json').write_text(json.dumps(metadata))
+        pending = self.fetch(503)
+        self.assertEqual(pending['deployed_at'], metadata['deployed_at'])
+        time.sleep(1.1)
+        self.assertEqual(self.fetch(200)['deployed_at'], metadata['deployed_at'])
+
+    def test_malformed_metadata_fails_without_exposing_content(self):
+        for metadata in [None, {'deployed_at': 'secret-invalid'},
+                         {'deployed_at': '2026-02-30T12:00:00Z'},
+                         {'deployed_at': '2026-11-17T12:00:00'},
+                         {'deployed_at': '2026-11-17T12:00:00Z', 'release': 'wrong-release'}]:
+            (self.root / 'deployment.json').write_text(json.dumps(metadata))
+            report = self.fetch(503)
+            self.assertEqual(report['checks'], {'health_configuration': 'failed'})
+            self.assertNotIn('secret-invalid', json.dumps(report))
+        (self.root / 'deployment.json').unlink()
+        (self.root / 'release.json').write_text(json.dumps({'format': 1, 'id': 'health-test', 'version': ['bad']}))
+        self.assertEqual(self.fetch(503)['checks'], {'health_configuration': 'failed'})
+
+    def test_legacy_timestamp_and_old_cache_upgrade(self):
+        (self.root / 'deployment.json').write_text(json.dumps({'deployed_at': '2026-11-17T08:00:00+00:00'}))
+        (self.root / 'health-cache/health-state.json').write_text(json.dumps({
+            'release': 'health-test', 'not_before': time.time() + .3,
+            'report': {'status': 'ok', 'release': 'health-test', 'check_id': 'old'}}))
+        self.assertEqual(self.fetch(503)['checks'], {'health_refresh': 'pending'})
+        time.sleep(.4)
+        report = self.fetch(200)
+        self.assertIsNone(report['version'])
+        self.assertEqual(report['deployed_at'], '2026-11-17T08:00:00+00:00')
+        self.assertNotEqual(report['check_id'], 'old')
 
     def test_alternatives_and_php_target(self):
         self.config['extension_alternatives'] = {'parser': ['json', 'codex_missing_extension_probe']}

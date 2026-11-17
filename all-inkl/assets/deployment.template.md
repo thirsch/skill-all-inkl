@@ -44,13 +44,13 @@ Uploads, private Daten, Sessions und Cache soweit benötigt behandeln. Schutz vo
 
 ## 6. Build und Artefakt
 
-Arbeitsverzeichnis, Installations-/Build-/Prüfbefehle, Lockfiles, enthaltene Produktionsdateien und ausgeschlossene Dateien aufführen. Reproduzierbaren Commit und Artefaktbezeichnung festlegen.
+Arbeitsverzeichnis, Installations-/Build-/Prüfbefehle, Lockfiles, enthaltene Produktionsdateien und ausgeschlossene Dateien aufführen. Reproduzierbaren Commit und Artefaktbezeichnung festlegen. Verbindliche Quelle der Anwendungsversion und Übergabe per `--version` an den Packer dokumentieren; ohne Versionsquelle `version: null`. `deployment.json` aus dem Build ausschließen.
 
 ## 7. Deploymentablauf
 
 Entwicklungsweg (Agent bei hinterlegtem SSH-Zugang, sonst manueller ZIP-Upload), initiale Produktivsetzung und anschließenden CI-Weg dokumentieren. Konkreten Paketierungsbefehl, Uploadziel und einzelnen SSH-Befehl zur manuellen Aktivierung angeben. Für CI Buildjob, Artefaktübergabe, Release-Trigger, Secrets und Zielumgebung benennen.
 
-Vorprüfung, Upload, Konfiguration, gegebenenfalls Migration, Umschaltung und Smoke-Test in projektspezifischer Reihenfolge aufführen. Health-URL, JSON-Feld für die tatsächlich laufende Release-ID und begrenzte Wiederholungen bei verzögert aktualisierten PHP-Workern festhalten. Gleiche ZIP-/Aktivierungslogik für alle Wege verwenden, gleichzeitige Deployments verhindern und ungeprüfte Befehle kennzeichnen. Einen reinen Workflow-Entwurf nicht als eingerichteten CI-Betrieb melden.
+Vorprüfung, Upload, Konfiguration, gegebenenfalls Migration, Umschaltung und Smoke-Test in projektspezifischer Reihenfolge aufführen. Health-URL, Metadatenfelder `release`, `version`, `deployed_at` und begrenzte Wiederholungen bei verzögert aktualisierten PHP-Workern festhalten. Gleiche ZIP-/Aktivierungslogik für alle Wege verwenden, gleichzeitige Deployments verhindern und ungeprüfte Befehle kennzeichnen. Einen reinen Workflow-Entwurf nicht als eingerichteten CI-Betrieb melden.
 
 ## 8. Datenbank, Backup und Rollback
 
@@ -59,6 +59,8 @@ Migrationen, Backup-Ort außerhalb öffentlicher Pfade, Wiederherstellung, vorhe
 ## 9. Prüfung und offene Punkte
 
 Projektabhängige Healthchecks festlegen: erforderliche PHP-Erweiterungen, optionale Hinweise, gegebenenfalls unterstützte Alternativen, Datenbank-`SELECT 1` und benötigte beschreibbare Verzeichnisse. Für jede Pflicht den Bezug zu Projektfunktion oder Produktionsabhängigkeit angeben. Pflichtfehler liefern HTTP 503, optionale Fehlschläge nur Warnungen. Web-PHP-Ergebnisse getrennt von CLI-/Composer-Prüfungen dokumentieren. Keine Secrets, absoluten Pfade oder Exceptiondetails in der öffentlichen Healthantwort.
+
+Anwendungsversion aus dem Artefakt und `deployed_at` aus der Serveraktivierung prüfen. Unbekannte Angaben bleiben `null`; `checked_at` ist kein Deploymentdatum. Rollback/Reaktivierung erneuern Zeitpunkt und interne Cache-Identität. Bei bestehenden Projekten Build, serverseitigen Deployer und Healthroute gemeinsam aktualisieren.
 
 Basic-Auth-Einrichtung, geschützte Serverdateien für Hash und Prüfclient sowie gemeinsamen Health-Cache dokumentieren. Standardintervall zehn Sekunden, optional eine Sekunde. Authentifizierung vor Prüfungen/Cachezugriff; auch Fehler cachen. Deploymentserie anhand verschiedener echter `check_id`-Werte prüfen. Gleichzeitige Requests, HTTP 401 ohne Zugang und Cache-Ablauf testen; keine Passwörter im Testprotokoll festhalten.
 

@@ -34,10 +34,14 @@ Der projektspezifische Build erzeugt einen eigenen Staging-Ordner, beispielsweis
 Einen echten Buildbefehl aus dem Projekt ableiten, der Tests, Installieren aus Lockfiles und explizites Kopieren benötigter Produktionsdateien erledigt. Kein pauschales ZIP des Repositorys und kein Buildskript mit Platzhaltern. Staging-Ordner vor jedem Build frisch erstellen. `.env`, private Schlüssel, Produktionsdaten und Backups gehören nicht hinein. Der Packer weist typische verbotene Dateien und Symlinks zurück, ersetzt aber keine bewusste Dateiauswahl oder Secret-Prüfung. Benötigte leere Laufzeitordner über die Vorbereitung erzeugen; der Packer archiviert Dateien, keine leeren Ordner.
 
 ```bash
-python3 deploy/package-release.py build/release dist/COMMIT-RUNNUMMER/release.zip COMMIT-RUNNUMMER
+python3 deploy/package-release.py build/release dist/COMMIT-RUNNUMMER/release.zip COMMIT-RUNNUMMER --version 1.2.3
 ```
 
 Das erzeugt `dist/COMMIT-RUNNUMMER/release.zip` und `dist/COMMIT-RUNNUMMER/release.zip.sha256`. Bei jedem Folgerelease eine neue Release-ID und einen dazugehörigen neuen Ausgabeordner verwenden; der Dateiname bleibt `release.zip`. Die Release-ID muss eindeutig sein (1–80 Buchstaben/Ziffern/`_`/`-`). Ein bestehendes ZIP wird nicht überschrieben. Archivinhalt liegt direkt an der Wurzel, ohne zusätzlichen Projektordner; `release.json` wird vom Packer erzeugt. SHA-256 schützt vor Übertragungsfehlern, ist keine Signatur für beliebige fremde ZIPs.
+
+`--version` mit der tatsächlichen Anwendungsversion aus der vereinbarten Projektquelle befüllen, z.B. `package.json.version` oder dem veröffentlichten Tag. Das Beispiel `1.2.3` ersetzen; ohne bekannte Version das Argument weglassen. Zulässig sind 1–128 ASCII-Zeichen: Buchstaben/Ziffern am Anfang, danach auch `.`, `_`, `+`, `-`; beispielsweise `v1.2.3-rc.1+build.4`. Der Packer erzeugt `{"format":1,"id":"COMMIT-RUNNUMMER","version":"1.2.3"}` bzw. `version: null`. Bestehende Aufrufe und Manifeste ohne Versionsfeld bleiben kompatibel. `release` bleibt die eindeutige Artefakt-ID; `version` kann über mehrere Entwicklungsdeployments gleich bleiben. Die Versionsquelle in den echten Build integrieren, nicht nur im Profil nennen.
+
+Der Server schreibt bei jeder Aktivierung unmittelbar vor dem Umschalten eine atomar ersetzte `deployment.json` mit `release`, `deployed_at` (UTC mit Mikrosekunden) und zufälliger `activation_id`. Scheitert das Umschalten, stellt er vorherige Metadaten wieder her. `install` allein schreibt keine Aktivierungsmetadaten. Rollback und erneute Aktivierung erhalten einen neuen Zeitpunkt; nach einem fehlgeschlagenen Smoke-Test bleibt dieser beim tatsächlich aktivierten Release erhalten. `deployment.json` ist für den Server reserviert: weder im ZIP mitliefern noch in `shared` verknüpfen. Das Health-Asset liefert daraus `deployed_at`, aus dem Manifest `version`; Details und Verhalten älterer Releases siehe [healthchecks.md](healthchecks.md).
 
 ## Manueller Weg: hochladen, ein Befehl
 
@@ -91,7 +95,7 @@ Bei ausschließlich interaktiver Passwortanmeldung den vorhandenen freigegebenen
 
 ## Nach initialem Produktivstand: CI
 
-Erste erfolgreiche Produktivaktivierung mit ID und Prüfergebnis im Projektprofil festhalten. Danach ist CI der reguläre Produktionsweg. Vorhandenes CI verwenden; bei GitHub ohne bestehenden Prozess an `release: published` anschließen. Der Buildjob baut und testet den veröffentlichten Tag und lädt `release.zip` und `release.zip.sha256` gemeinsam als benanntes Artefakt hoch. Anschließend den mitgelieferten wiederverwendbaren Workflow mit `needs: build` aufrufen. Kein Deployment aus ungeprüften PR-Artefakten.
+Erste erfolgreiche Produktivaktivierung mit ID und Prüfergebnis im Projektprofil festhalten. Danach ist CI der reguläre Produktionsweg. Vorhandenes CI verwenden; bei GitHub ohne bestehenden Prozess an `release: published` anschließen. Der Buildjob baut und testet den veröffentlichten Tag, übergibt die bestätigte Anwendungsversion an den Packer (`--version`) und lädt `release.zip` und `release.zip.sha256` gemeinsam als benanntes Artefakt hoch. Anschließend den mitgelieferten wiederverwendbaren Workflow mit `needs: build` aufrufen. Kein Deployment aus ungeprüften PR-Artefakten.
 
 Beispiel für den Aufruf im projektspezifischen Release-Workflow (der reale `build`-Job und dessen Artefaktname müssen dazu passen):
 
