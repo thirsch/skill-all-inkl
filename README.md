@@ -43,7 +43,17 @@ In Codex den mitgelieferten Skill-Installer beauftragen:
 
 > Verwende skill-installer und installiere aus dem GitHub-Repository thirsch/skill-all-inkl den Skill im Unterordner all-inkl.
 
-Der Installer benötigt Zugriff auf das private Repository und installiert eine Kopie. Diese Variante wird nicht durch ein späteres `git pull` eines separaten Checkouts aktualisiert; für Updates die installierte Kopie bewusst aktualisieren lassen. Ein vorhandenes Installationsziel wird vom Installer nicht überschrieben.
+Der Installer benötigt Zugriff auf das private Repository und installiert eine Kopie. Diese Variante wird nicht durch ein späteres `git pull` eines separaten Checkouts aktualisiert. Ein vorhandenes Installationsziel wird vom Installer nicht überschrieben.
+
+### Eine per Skill-Installer installierte Kopie aktualisieren
+
+Auf dem betreffenden Rechner Codex mit folgendem Auftrag starten:
+
+> Aktualisiere meinen installierten Skill `all-inkl` mit dem Skill-Installer aus `thirsch/skill-all-inkl`, Unterordner `all-inkl`, Branch `main`. Lade die neue Version zunächst temporär herunter. Prüfe auf lokale Anpassungen und sichere die bisherige Installation außerhalb des Skills-Verzeichnisses. Ersetze sie anschließend durch die neue Version. Bei einem Fehler stelle die Sicherung wieder her.
+
+Der Rechner benötigt weiterhin Zugriff auf das private GitHub-Repository. Nach erfolgreicher Installation steht die aktualisierte Version ab der nächsten Nachricht zur Verfügung.
+
+Bereits vorbereitete Projekte werden dadurch nicht automatisch aktualisiert: Ihre kopierten Deployment- und Healthcheck-Dateien müssen separat mit dem neuen Skill abgeglichen und übernommen werden.
 
 ## Verwenden
 
